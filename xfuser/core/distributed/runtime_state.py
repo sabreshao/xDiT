@@ -165,6 +165,51 @@ class DiTRuntimeState(RuntimeState):
                 backbone_inner_dim=pipeline.transformer.config.num_attention_heads
                 * pipeline.transformer.config.attention_head_dim,
             )
+        self.use_hybrid_fp8_attn = False
+        self.use_fp8_attn = False
+
+    def check_fp8_availability(self, use_fp8_attn: bool, use_hybrid_fp8_attn: bool):
+        if (use_fp8_attn or use_hybrid_fp8_attn):
+            if envs.PACKAGES_CHECKER.packages_info["has_aiter"]:
+                try:
+                    from aiter import flash_attn_fp8_pertensor_func
+                except ImportError:
+                    raise RuntimeError("aiter fp8 flash attention is not available")
+
+                if self.parallel_config.sp_config.ring_degree > 1:
+                    raise RuntimeError(
+                        "Fp8 attention is not supported with ring flash attention"
+                    )
+            else:
+                raise RuntimeError(
+                    "Only AITER is currently supported for fp8 attention."
+                )
+
+        if (use_fp8_attn and use_hybrid_fp8_attn):
+            raise RuntimeError("Choose either fp8 attention or hybrid fp8 attention, not both.")
+
+    def increment_step_counter(self):
+        """
+        Keep track of the current denoising step, and set fp8 flag based on the current step.
+        Used for hybrid fp8 attention, when toggling between bf16 and fp8 is needed.
+        When the entire denoising process is over, the step counter is reset to 0.
+        """
+        if self.use_hybrid_fp8_attn:
+            self.use_fp8_attn = self.fp8_decision_vector[self.step_counter]
+            self.step_counter += 1
+            if self.step_counter >= self.total_steps:
+                self.step_counter = 0
+
+    def set_hybrid_attn_parameters(self, fp8_decision_vector: torch.Tensor):
+        """
+        Set the parameters for hybrid fp8 attention.
+        fp8_decision_vector: A boolean tensor of length equal to the total number of denoising steps.
+        Each element indicates whether to use fp8 attention (True) or bf16 attention (False).
+        """
+        self.fp8_decision_vector = fp8_decision_vector
+        self.total_steps = len(fp8_decision_vector)
+        self.step_counter = 0
+        self.use_hybrid_fp8_attn = True
 
     def set_input_parameters(
         self,
